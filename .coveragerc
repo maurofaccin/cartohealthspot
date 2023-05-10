@@ -1,0 +1,9 @@
+[run]
+source =
+    carto_healthspot
+    tests
+
+omit =
+    *__init__.py
+
+parallel = True
