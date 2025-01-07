@@ -7,7 +7,7 @@ import geojson
 import geopandas as geopd
 import rasterio
 from rasterio import mask, warp
-from shapely.geometry import shape
+from h3ronpy.pandas.raster import raster_to_geodataframe
 
 from carto_healthspot import utils
 
@@ -49,7 +49,7 @@ def extract_worldpop(input_path: pathlib.Path, out_path: pathlib.Path, cutline=N
                 dst_height=cl_shape[1],
             )
             # geoms = load_shapes(cutline)
-            geoms = [f['geometry'] for f in cl_feats.iterfeatures()]
+            geoms = [f["geometry"] for f in cl_feats.iterfeatures()]
             out_img, out_trans = mask.mask(src, geoms, nodata=src.nodata)
         else:
             # otherwise just use the original size and bounds.
@@ -60,7 +60,13 @@ def extract_worldpop(input_path: pathlib.Path, out_path: pathlib.Path, cutline=N
         # copy the rest of metadata
         kwargs = src.meta.copy()
         kwargs.update(
-            {"crs": dst_crs, "transform": transform, "width": w, "height": h, "compress": "lzw"}
+            {
+                "crs": dst_crs,
+                "transform": transform,
+                "width": w,
+                "height": h,
+                "compress": "lzw",
+            }
         )
 
         b1 = src.read(1)
@@ -118,6 +124,25 @@ def load_shapes(geojson_path):
         feats = geojson.load(fin)
 
     return [f["geometry"] for f in feats.features]
+
+
+def pop_to_h3(
+    raster_path: pathlib.Path, h3_file_path: pathlib.Path, h3_resolution: int
+):
+    with rasterio.open(raster_path, mode="r") as src:
+        data = src.read(1)
+        profile = src.profile
+
+    h3_hex = raster_to_geodataframe(
+        data,
+        profile["transform"],
+        h3_resolution,
+        nodata_value=profile["nodata"],
+        compact=False,
+        geo=True,
+    )
+
+    h3_hex.to_file(h3_file_path)
 
 
 def __check_bounds__(bin, bout):

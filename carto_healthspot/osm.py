@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+"""Save osm data locally as GeoJSON.
+
+It uses overpass APIs.
+"""
 
 import pathlib
 import subprocess as sp
@@ -33,14 +37,18 @@ def query(countrycode: str, kind: str, **kwargs):
     op_verb = "body"
     if kind == "admin":
         level = kwargs.get("level", 6)
-        op_query.append(f'rel["boundary"="administrative"]["admin_level"="{level}"](area.country);')
+        op_query.append(
+            f'rel["boundary"="administrative"]["admin_level"="{level}"](area.country);'
+        )
         op_query.append("out;")
         op_query.append(">;")
 
     elif kind == "health":
         op_query.append("(")
         op_query.append('    nwr["healthcare"](area.country);')
-        op_query.append('    nwr["amenity"="clinic|doctors|hospital|pharmacy"](area.country);')
+        op_query.append(
+            '    nwr["amenity"="clinic|doctors|hospital|pharmacy"](area.country);'
+        )
         op_query.append(");")
         op_verb = "tags center"
 
@@ -57,8 +65,19 @@ def query(countrycode: str, kind: str, **kwargs):
 
 
 def request(countrycode: str, kind: str, outpath: pathlib.Path, **kwargs):
-    """Request to overpass data."""
+    """Request to overpass data.
 
+    Parameters
+    ----------
+    countrycode : str
+        ISO2 code of the country (e.g. IT, US, CM, CD, …)
+    kind : str
+        type of features to retrieve: `admin`, `health` or `mines`
+    outpath : pathlib.Path
+        file to save (e.g. path.geojson)
+    **kwargs
+        other arguments for query()
+    """
     api = overpass.API(timeout=5000, endpoint="https://overpass-api.de/api/interpreter")
     qry, verb = query(countrycode, kind, **kwargs)
     res = api.get(
@@ -67,7 +86,9 @@ def request(countrycode: str, kind: str, outpath: pathlib.Path, **kwargs):
         responseformat="xml",
     )
 
-    with tempfile.NamedTemporaryFile("w", prefix="overpass_reply_", suffix=".osm") as fout:
+    with tempfile.NamedTemporaryFile(
+        "w", prefix="overpass_reply_", suffix=".osm"
+    ) as fout:
         fout.write(res)
         print(fout.name)
 
@@ -78,7 +99,9 @@ def request(countrycode: str, kind: str, outpath: pathlib.Path, **kwargs):
         # filter out lines and points
         print("filtering", len(geo_data.features))
         geo_data.features = [
-            feat for feat in geo_data.features if feat.geometry.type in ["Polygon", "MultiPolygon"]
+            feat
+            for feat in geo_data.features
+            if feat.geometry.type in ["Polygon", "MultiPolygon"]
         ]
         print("filtering", len(geo_data.features))
 
@@ -87,6 +110,8 @@ def request(countrycode: str, kind: str, outpath: pathlib.Path, **kwargs):
         geojson.dump(geo_data, gj_fout)
 
 
+# Examples:
+# --------
 # request("CM", "admin", level=4)
 # request("CM", "health", pathlib.Path("health.geojson"))
 # request("CM", "mines", pathlib.Path("mines.geojson"))

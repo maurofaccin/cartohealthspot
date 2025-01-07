@@ -6,11 +6,11 @@ import pathlib
 import shutil
 
 import click
-from xdg import BaseDirectory
+from xdg_base_dirs import xdg_cache_home
 
 from carto_healthspot import utils
 
-CACHEDIR = pathlib.Path(BaseDirectory.save_cache_path("cartohs"))
+CACHEDIR = xdg_cache_home() / "carto_healthspot"
 
 
 def _cache_path(kind: str = ""):
@@ -74,12 +74,20 @@ def extract_pop(worldpop: pathlib.Path, cutline: pathlib.Path):
     type=pathlib.Path,
     help="Location of mining sites (filepath to a geojson).",
 )
+@click.option(
+    "--mine-threshold",
+    type=float,
+    required=False,
+    default=0.005,
+    help="Expected incidence rate close to mines.",
+)
 @click.argument("zone_shapes", type=pathlib.Path)
 @click.argument("output", type=pathlib.Path)
 def cases(
     zone_shapes: pathlib.Path,
     healthsites: pathlib.Path | None = None,
     mines: pathlib.Path | None = None,
+    mine_threshold: float = 0.01,
     output: pathlib.Path | None = None,
 ):
     """Disaggregate reported cases ZONE_SHAPES.
@@ -95,24 +103,32 @@ def cases(
     from carto_healthspot.compute_cases import disaggregate_cases
 
     disaggregate_cases(
-        input_filepath, zone_shapes, output, hfac_path=healthsites, mine_path=mines
+        input_filepath,
+        zone_shapes,
+        output,
+        hfac_path=healthsites,
+        mine_path=mines,
+        mine_incidence_rate=mine_threshold,
     )
 
 
 @cli.command()
-@click.argument("OUTPUT", type=pathlib.Path)
-def export_html(OUTPUT: pathlib.Path):
+@click.argument("case_distribution", type=pathlib.Path)
+@click.argument("urban_risk", type=pathlib.Path)
+def urban():
+    """Risk in urban areas."""
+    raise NotImplementedError
+
+
+@cli.command()
+@click.argument("output", type=pathlib.Path)
+def export_html(output: pathlib.Path):
     """Export the incidence rate to a HTML map."""
     cases_filepath = _cache_path("cases")
 
     from carto_healthspot.export import export2html
-    export2html(cases_filepath, OUTPUT)
 
-
-@cli.command()
-def urban():
-    """Risk in urban areas."""
-    raise NotImplementedError
+    export2html(cases_filepath, output)
 
 
 @cli.command()
@@ -122,8 +138,6 @@ def urban():
 @click.argument("path", type=pathlib.Path)
 def osm(iso2, kind, path, args):
     """Retrieve osm data."""
-    from geo import osm
-
     kwargs = {}
     if args is not None:
         for arg in args.split():
@@ -131,7 +145,9 @@ def osm(iso2, kind, path, args):
             kwargs[k] = v
 
     print(kwargs)
-    osm.request(iso2, kind, path, **kwargs)
+    from carto_healthspot.osm import request
+
+    request(iso2, kind, path, **kwargs)
 
 
 @cli.command()

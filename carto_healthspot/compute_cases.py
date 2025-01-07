@@ -31,7 +31,7 @@ import pyproj
 import rasterio
 import shapely
 from rasterio.features import rasterize as riorasterize
-from scipy import ndimage
+from scipy import ndimage, optimize
 from tqdm import tqdm
 
 from carto_healthspot import utils
@@ -66,6 +66,7 @@ def disaggregate_cases(
     casesfile: pathlib.Path,
     hfac_path: pathlib.Path | None = None,
     mine_path: pathlib.Path | None = None,
+    mine_incidence_rate: float = 0.005,
 ):
     """Compute the incidence rate from population and disease reports.
 
@@ -88,17 +89,18 @@ def disaggregate_cases(
 
     utils.log(f"Total reported cases: {cases.sum()}")
 
+    if mine_path is not None:
+        utils.log("--- --- mines")
+        mines = mining_incidence(
+            cases, metadata, mine_path, incidence_rate=mine_incidence_rate
+        )
+        cases = np.maximum(cases, mines)
+        utils.log(f"Total reported cases: {cases.sum()}")
+
     if hfac_path is not None:
         utils.log("--- --- health facilities closeness")
         hmap = health_facilities(metadata, hfac_path)
         cases *= hmap
-        utils.log(f"Total reported cases: {cases.sum()}")
-
-    if mine_path is not None:
-        utils.log("--- --- mines")
-        # mines = mining_incidence(popfile, mine_path)
-        mines = mining_incidence(metadata, mine_path)
-        cases = np.maximum(cases, mines)
         utils.log(f"Total reported cases: {cases.sum()}")
 
     with rasterio.open(popfile, "r") as inraster:
@@ -107,17 +109,19 @@ def disaggregate_cases(
 
 
 def mining_incidence(
+    cases: np.ndarray,
     metadata: Metadata,
     mine_path: pathlib.Path,
-    radius: float = 5000.0,
+    radius: float = 2000.0,
     incidence_rate: float = 0.01,
 ):
     """Compute the incidence close to mining sites.
 
     Parameters
     ----------
-    popfile : pathlib.Path
-        path to the population file
+    cases: np.ndarray
+        already computed number of cases
+    metadata : Metadata
     mine_path : pathlib.Path
         path to the mines file
     radius : int
@@ -142,27 +146,20 @@ def mining_incidence(
         # rasterized mines
     utils.log("rasterize")
     mines = dilated_and_blurred(metadata, mine_feats, radius, kind="approx")
+
+    inc = (cases / pop) * (mines * 9 + 1)
+
+    return np.clip(inc, 0, incidence_rate) * pop
+
+    return mines * 9 + 1
     unit_area = utils.box_area(*bounds) / pop.size / 1e6  # in km^2
     inc = _effective_population(
         pop,
         min_pop=THR1 * unit_area,
         half_value=THR2 * unit_area,
     )
-    print(inc.min())
-    mines = mines * incidence_rate * inc * pop
-    return mines
-
-    mines = rasterize([mine["geometry"] for mine in mine_feats.iterfeatures()], bounds, pop.shape)
-
-    area_of_influence = dilated_and_blurred(metadata, mine_feats, radius)
-
-    unit_area = utils.box_area(*bounds) / pop.size / 1e6  # in km^2
-    inc = _effective_population(
-        pop,
-        min_pop=THR1 * unit_area,
-        half_value=THR2 * unit_area,
-    )
-    return area_of_influence * incidence_rate * inc * pop
+    return mines * incidence_rate * inc * pop
+    # return mines * incidence_rate * pop
 
 
 def pop2cases(
@@ -178,29 +175,58 @@ def pop2cases(
 
     # incidence rate computed according to SIS compartmental model
     # at the dynamical equilibrium.
-    case_dist = (
-        _effective_population(
-            pop,
-            min_pop=min_pop,
-            half_value=half_value,
+    if True:
+        kind = "r0"
+
+        def __comp_cases__(p1, p0, pop, ncases, kind: str = "old"):
+            return np.abs(
+                (
+                    _effective_population(pop, min_pop=p0, half_value=p1, kind=kind)
+                    * pop
+                ).sum()
+                - ncases
+            )
+
+        opt = optimize.minimize_scalar(
+            __comp_cases__,
+            args=(min_pop, pop, cases, kind),
+            # bounds=(min_pop, 100000 * min_pop),
+            # bounds=(1, 1000000),
+            # bounds=(1 / pop.max(), 100),
         )
-        * pop
-    )
+        case_dist = (
+            _effective_population(pop, min_pop=min_pop, half_value=opt.x, kind=kind)
+            * pop
+        )
+        print(f"{cases} => {case_dist.sum()}     args: {opt.x}   {min_pop}")
+        assert case_dist.sum() > cases / 2
+        case_dist = np.ma.masked_less_equal(case_dist, 0)
+    else:
+        case_dist = (
+            _effective_population(
+                pop,
+                min_pop=min_pop,
+                half_value=half_value,
+            )
+            * pop
+        )
 
-    # the population is too sparse
-    if case_dist.max() <= 1e-5:
-        return 0.0
+        # the population is too sparse
+        if case_dist.max() <= 1e-5:
+            return 0.0
 
-    # should sum up to the expected number of cases,
-    # preserving the proportions
-    case_dist *= cases / case_dist.sum()
+        # should sum up to the expected number of cases,
+        # preserving the proportions
+        case_dist *= cases / case_dist.sum()
+
     case_dist[pop.mask] = 0.0
 
     incidence_rate = case_dist / pop
     if incidence_rate.max() > max_rate:
-        utils.log(f"ncidence above threshold ({incidence_rate.max()} / {max_rate}). Clipping.")
-        incidence_rate[incidence_rate > max_rate] = max_rate
-        case_dist = incidence_rate * pop
+        utils.log(
+            f"Incidence above threshold ({incidence_rate.max():6.5f} / {max_rate}). Clipping."
+        )
+        case_dist = np.clip(incidence_rate, 0, max_rate) * pop
         # re-adjust
         case_dist *= cases / case_dist.sum()
     return case_dist.data
@@ -210,8 +236,15 @@ def _effective_population(
     pop: np.ma.masked_array,
     min_pop: float = 100,
     half_value: float = 500,
+    kind: str = "old",
 ):
-    incidence = (pop - min_pop) / (half_value + pop - 2 * min_pop)
+    if kind == "old":
+        incidence = (pop - min_pop) / (half_value + pop - 2 * min_pop)
+    elif kind == "r0":
+        incidence = (pop - 1) / (pop + half_value)
+    elif kind == "linear":
+        incidence = 1 - 1 / (half_value * pop)
+
     return np.clip(incidence, 0.0, 1.0)
 
 
@@ -287,7 +320,9 @@ def disaggregate_zones(
         unit_area = utils.box_area(*metadata.bounds) / pop.size / 1e6  # in km^2
 
         for hz in tqdm(healthzones.iterfeatures(), total=len(healthzones)):
-            hz_mask = rasterize([hz["geometry"]], metadata.profile["transform"], metadata.shape)
+            hz_mask = rasterize(
+                [hz["geometry"]], metadata.profile["transform"], metadata.shape
+            )
             hz_cases = hz["properties"]["cases"]
 
             loc_case_distribution = pop2cases(
@@ -384,8 +419,12 @@ def health_facilities(
     """
     hfacs = geopd.read_file(hfac_path)
 
-    hfac_hospitals = hfacs[(hfacs.amenity == "hospital") | (hfacs.healthcare == "hospital")]
-    hfac_others = hfacs[(hfacs.amenity != "hospital") & (hfacs.healthcare != "hospital")]
+    hfac_hospitals = hfacs[
+        (hfacs.amenity == "hospital") | (hfacs.healthcare == "hospital")
+    ]
+    hfac_others = hfacs[
+        (hfacs.amenity != "hospital") & (hfacs.healthcare != "hospital")
+    ]
 
     f1 = dilated_and_blurred(metadata, hfac_hospitals, 2 * 5000, kind="approx")
     f2 = dilated_and_blurred(metadata, hfac_others, 5000, kind="approx")
@@ -407,10 +446,15 @@ def dilated_and_blurred(
         buf = lenght(radius, metadata.bounds)
         utils.log(f"Using a buffer of {buf}")
         dilated = geopd.GeoSeries(
-            [feat["geometry"].buffer((buf[0] + buf[1]) / 2) for _, feat in features.iterrows()]
+            [
+                feat["geometry"].buffer((buf[0] + buf[1]) / 2)
+                for _, feat in features.iterrows()
+            ]
         )
         dilated_polygon = dilated.unary_union
-        dilated_raster = rasterize([dilated_polygon], metadata.profile["transform"], metadata.shape)
+        dilated_raster = rasterize(
+            [dilated_polygon], metadata.profile["transform"], metadata.shape
+        )
 
         # sigma needs to be that small!
         dilated_raster = np.clip(gaussian_filter(dilated_raster, sigma / 2), 0, 1.0)
@@ -421,9 +465,9 @@ def dilated_and_blurred(
         dilated_raster = np.zeros(metadata.shape)
         for indx, feat in tqdm(features.iterrows(), total=len(features)):
             for point in relevant_points(feat["geometry"]):
-                center_indx = list(map(int, metadata.profile["transform"].__invert__() * point))[
-                    ::-1
-                ]
+                center_indx = list(
+                    map(int, metadata.profile["transform"].__invert__() * point)
+                )[::-1]
                 ov_ind = _matrix_slice_overlap(
                     center_indx, dilated_raster.shape, gaussian_center, gaussian.shape
                 )

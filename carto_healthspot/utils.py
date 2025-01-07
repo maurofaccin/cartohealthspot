@@ -3,12 +3,11 @@
 
 import logging
 import pathlib
-from functools import partial
 
 import numpy as np
 import pyproj
 import rasterio
-from shapely import geometry, ops
+from shapely import geometry
 
 logging.basicConfig(level=20)
 
@@ -61,7 +60,7 @@ def num2deg(xtile: int, ytile: int, zoom: int) -> tuple:
     return (lat_deg, lon_deg)
 
 
-def log(text, level='info'):
+def log(text, level="info"):
     """Log."""
     if level == "warn":
         logging.warning(text)
